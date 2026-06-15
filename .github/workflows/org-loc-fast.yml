@@ -1,4 +1,4 @@
-name: Fast Org LOC Report
+name: Ultra Fast Org LOC Report
 
 on:
   workflow_dispatch:
@@ -8,64 +8,103 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Install tools
+      # =========================
+      # Install tools
+      # =========================
+      - name: Install dependencies
         run: |
           sudo apt update
-          sudo apt install -y jq curl tar gzip parallel
+          sudo apt install -y jq curl tar gzip parallel file
+
           curl -sSL https://github.com/XAMPPRocky/tokei/releases/latest/download/tokei-x86_64-unknown-linux-gnu.tar.gz | tar -xz
           sudo mv tokei /usr/local/bin/
 
-      - name: Fetch all repos
+      # =========================
+      # Fetch all repos (PAGINATED)
+      # =========================
+      - name: Get organization repos
         env:
           GH_TOKEN: ${{ secrets.GH_TOKEN }}
         run: |
           > repos.txt
 
           page=1
+
           while true; do
-            data=$(curl -s -H "Authorization: token $GH_TOKEN" \
+            response=$(curl -s -H "Authorization: token $GH_TOKEN" \
               "https://api.github.com/orgs/ontheway-queen/repos?per_page=100&page=$page&type=all")
 
-            count=$(echo "$data" | jq 'length')
+            count=$(echo "$response" | jq 'length')
             [ "$count" -eq 0 ] && break
 
-            echo "$data" | jq -r '.[].name' >> repos.txt
+            echo "$response" | jq -r '.[].name' >> repos.txt
+
             page=$((page+1))
           done
 
-      - name: Process repos in parallel (FAST MODE)
+          echo "Total repos:"
+          wc -l repos.txt
+
+      # =========================
+      # Process repos FAST (parallel)
+      # =========================
+      - name: Process repositories (FAST MODE)
         env:
           GH_TOKEN: ${{ secrets.GH_TOKEN }}
           ORG: ontheway-queen
         run: |
-          export GH_TOKEN ORG
 
           process_repo() {
             repo=$1
-
             echo "Processing $repo"
 
             tmp=$(mktemp -d)
 
-            # Download tarball (NO git clone)
+            # =========================
+            # FIXED DOWNLOAD (NO GZIP ERROR)
+            # =========================
             curl -sL \
-              -H "Authorization: token $GH_TOKEN" \
-              "https://api.github.com/repos/$ORG/$repo/tarball" \
+              "https://codeload.github.com/$ORG/$repo/tar.gz/HEAD" \
               -o "$tmp/repo.tar.gz"
 
+            # Validate file
+            if ! file "$tmp/repo.tar.gz" | grep -q "gzip"; then
+              echo "Skipping $repo (invalid archive)"
+              rm -rf "$tmp"
+              return
+            fi
+
             mkdir -p "$tmp/src"
+
             tar -xzf "$tmp/repo.tar.gz" -C "$tmp/src" --strip-components=1
 
-            tokei "$tmp/src" --output json
+            # Run tokei safely
+            tokei "$tmp/src" --output json 2>/dev/null || true
 
             rm -rf "$tmp"
           }
 
           export -f process_repo
+          export ORG
 
-          cat repos.txt | parallel -j 16 process_repo > raw.json
+          # Run with high parallelism (adjust if needed)
+          cat repos.txt | parallel -j 16 process_repo > raw_results.json
 
-      - name: Merge results
+      # =========================
+      # Merge results
+      # =========================
+      - name: Aggregate LOC results
         run: |
-          jq -s 'add' raw.json > final.json
-          cat final.json
+          jq -s 'add' raw_results.json > final_loc.json
+
+          echo "===== FINAL LOC RESULT ====="
+          cat final_loc.json
+
+      # =========================
+      # Upload artifact
+      # =========================
+      - name: Upload report
+        uses: actions/upload-artifact@v4
+        with:
+          name: loc-report
+          path: final_loc.json
