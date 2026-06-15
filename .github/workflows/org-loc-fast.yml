@@ -55,28 +55,37 @@ jobs:
         run: |
 
           process_repo() {
-            repo=$1
-            echo "Processing $repo"
-
             tmp=$(mktemp -d)
 
-            # =========================
-            # FIXED DOWNLOAD (NO GZIP ERROR)
-            # =========================
-            curl -sL \
-              "https://codeload.github.com/$ORG/$repo/tar.gz/HEAD" \
-              -o "$tmp/repo.tar.gz"
+            url="https://codeload.github.com/$ORG/$repo/tar.gz/HEAD"
 
-            # Validate file
-            if ! file "$tmp/repo.tar.gz" | grep -q "gzip"; then
-              echo "Skipping $repo (invalid archive)"
+            # Download with HTTP check
+            http_code=$(curl -sL -w "%{http_code}" \
+              "$url" \
+              -o "$tmp/repo.tar.gz")
+
+            # If request failed → skip
+            if [ "$http_code" -ne 200 ]; then
+              echo "❌ Skip $repo (HTTP $http_code)"
               rm -rf "$tmp"
-              return
+              return 0
+            fi
+
+            # Verify it's really gzip
+            if ! file "$tmp/repo.tar.gz" | grep -q "gzip"; then
+              echo "❌ Invalid archive for $repo"
+              rm -rf "$tmp"
+              return 0
             fi
 
             mkdir -p "$tmp/src"
 
-            tar -xzf "$tmp/repo.tar.gz" -C "$tmp/src" --strip-components=1
+            # Safe extract
+            if ! tar -xzf "$tmp/repo.tar.gz" -C "$tmp/src" --strip-components=1; then
+              echo "❌ Extract failed for $repo"
+              rm -rf "$tmp"
+              return 0
+            fi
 
             # Run tokei safely
             tokei "$tmp/src" --output json 2>/dev/null || true
