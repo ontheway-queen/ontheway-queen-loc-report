@@ -1,0 +1,71 @@
+name: Fast Org LOC Report
+
+on:
+  workflow_dispatch:
+
+jobs:
+  loc:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Install tools
+        run: |
+          sudo apt update
+          sudo apt install -y jq curl tar gzip parallel
+          curl -sSL https://github.com/XAMPPRocky/tokei/releases/latest/download/tokei-x86_64-unknown-linux-gnu.tar.gz | tar -xz
+          sudo mv tokei /usr/local/bin/
+
+      - name: Fetch all repos
+        env:
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+        run: |
+          > repos.txt
+
+          page=1
+          while true; do
+            data=$(curl -s -H "Authorization: token $GH_TOKEN" \
+              "https://api.github.com/orgs/ontheway-queen/repos?per_page=100&page=$page&type=all")
+
+            count=$(echo "$data" | jq 'length')
+            [ "$count" -eq 0 ] && break
+
+            echo "$data" | jq -r '.[].name' >> repos.txt
+            page=$((page+1))
+          done
+
+      - name: Process repos in parallel (FAST MODE)
+        env:
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+          ORG: ontheway-queen
+        run: |
+          export GH_TOKEN ORG
+
+          process_repo() {
+            repo=$1
+
+            echo "Processing $repo"
+
+            tmp=$(mktemp -d)
+
+            # Download tarball (NO git clone)
+            curl -sL \
+              -H "Authorization: token $GH_TOKEN" \
+              "https://api.github.com/repos/$ORG/$repo/tarball" \
+              -o "$tmp/repo.tar.gz"
+
+            mkdir -p "$tmp/src"
+            tar -xzf "$tmp/repo.tar.gz" -C "$tmp/src" --strip-components=1
+
+            tokei "$tmp/src" --output json
+
+            rm -rf "$tmp"
+          }
+
+          export -f process_repo
+
+          cat repos.txt | parallel -j 16 process_repo > raw.json
+
+      - name: Merge results
+        run: |
+          jq -s 'add' raw.json > final.json
+          cat final.json
